@@ -2,11 +2,11 @@
 
 #include <any>
 #include <expected>
+#include <queue>
 #include <string>
 #include <unordered_map>
-#include <vector>
-#include <queue>
 #include <unordered_set>
+#include <vector>
 
 namespace pipeline {
 
@@ -20,7 +20,7 @@ class IStage {
   public:
     virtual ~IStage() = default;
     virtual Key stage_key() const = 0;
-    virtual void run(Context& context) = 0;
+    virtual void run(Context &context) = 0;
 };
 
 template <class Out, class F, class... Ins>
@@ -61,7 +61,7 @@ class Pipeline {
     std::unordered_map<Key, int> in_degree;
     Context context;
 
-    Result<std::unordered_set<Key>> get_all_upstream_stages(const Key& key) {
+    Result<std::unordered_set<Key>> get_all_upstream_stages(const Key &key) {
         std::unordered_set<Key> graph;
         std::queue<Key> frontier;
         frontier.push(key);
@@ -73,7 +73,7 @@ class Pipeline {
             if (!upstream_edges.contains(curr)) {
                 return std::unexpected(Error::UnknownDependency);
             }
-            
+
             for (const auto &neighbor : upstream_edges.at(curr)) {
                 if (!graph.contains(neighbor)) {
                     graph.insert(curr);
@@ -98,7 +98,7 @@ class Pipeline {
         for (const auto &dep : upstream_deps) {
             if (!stages.contains(dep)) {
                 return std::unexpected(Error::UnknownDependency);
-            } 
+            }
         }
 
         std::unique_ptr<IStage> stage_ptr = std::make_unique<
@@ -118,20 +118,21 @@ class Pipeline {
         return Port<Out>{id};
     }
 
-    template <class T>
-    Result<T> run(const Port<T>& out) {
+    template <class T> Result<T> run(const Port<T> &out) {
         // Start each run with a fresh state.
-        // Allowing the user to optionally cache outputs 
+        // Allowing the user to optionally cache outputs
         // is a possible future extension.
         context.stage_results.clear();
-        Result<std::unordered_set<Key>> upstream_stages_result = get_all_upstream_stages(out.id);
+        Result<std::unordered_set<Key>> upstream_stages_result =
+            get_all_upstream_stages(out.id);
         if (!upstream_stages_result.has_value()) {
             return upstream_stages_result.error();
         }
 
-        std::unordered_set<Key> all_stages_to_run = upstream_stages_result.value();
+        std::unordered_set<Key> all_stages_to_run =
+            upstream_stages_result.value();
         std::queue<Key> ready;
-        for (const auto& key : all_stages_to_run) {
+        for (const auto &key : all_stages_to_run) {
             if (in_degree.at(key) == 0) {
                 ready.push(key);
             }
@@ -147,7 +148,7 @@ class Pipeline {
             stages.at(curr)->run(context);
             num_stages_run++;
 
-            for (const auto& downstream : downstream_edges.at(curr)) {
+            for (const auto &downstream : downstream_edges.at(curr)) {
                 if (all_stages_to_run.contains(downstream)) {
                     if (--in_degree.at(downstream) == 0) {
                         ready.push(downstream);
@@ -162,14 +163,12 @@ class Pipeline {
 
         try {
             return std::any_cast<T>(context.stage_results.at(out.stage));
-        } catch (const std::bad_any_cast&) {
+        } catch (const std::bad_any_cast &) {
             return std::unexpected(Error::TypeMismatch);
-        } catch (const std::out_of_range&) {
+        } catch (const std::out_of_range &) {
             return std::unexpected(Error::UnknownDependency);
         }
-        
     }
-
 };
 
 } // namespace pipeline
