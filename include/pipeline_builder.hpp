@@ -4,6 +4,9 @@
 #include <unordered_map>
 #include <string>
 #include <vector>
+#include <expected>
+
+namespace pipeline {
 
 using Key = std::string;
 using Value = std::any;
@@ -34,3 +37,31 @@ public:
         // TODO
     }
 };
+
+enum class Error {
+    StageAlreadyExists,
+    CycleDetected,
+    UnknownDependency,
+    TypeMismatch,
+};
+
+template<class T>
+using Result = std::expected<T, Error>;
+using Status = Result<std::monostate>;
+
+template <class T>
+struct Port {
+    Key id;
+};
+
+class Pipeline {
+private:
+    std::unordered_map<Key, std::unique_ptr<IStage>> stages;
+    std::unordered_map<Key, std::vector<Key>> downstream_edges;
+    std::unordered_map<Key, std::vector<Key>> upstream_edges;
+    Context context;
+public:
+    Pipeline() = default;
+};
+
+} // namespace pipeline
