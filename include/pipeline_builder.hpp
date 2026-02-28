@@ -2,6 +2,7 @@
 
 #include <any>
 #include <expected>
+#include <iostream>
 #include <queue>
 #include <string>
 #include <unordered_map>
@@ -30,21 +31,46 @@ class StageModel final : public IStage {
     std::vector<std::string> upstream_deps;
     F func;
 
+    template <std::size_t... I>
+    void run_impl(Context &context, std::index_sequence<I...>) {
+        Out result = std::invoke(
+            func, std::any_cast<const Ins &>(
+                      context.stage_results.at(upstream_deps[I]))...);
+
+        context.stage_results[stage] = std::move(result);
+    }
+
   public:
     StageModel(Key stage, std::vector<Key> upstream_deps, F func)
         : stage(std::move(stage)), upstream_deps(std::move(upstream_deps)),
           func(std::forward<F>(func)) {}
 
     Key stage_key() const override { return stage; }
-    void run(Context &context) override {}
+    void run(Context &context) override {
+        run_impl(context, std::index_sequence_for<Ins...>{});
+    }
 };
 
 enum class Error {
     StageAlreadyExists,
     UnknownStage,
     TypeMismatch,
-    CycleDetected
+    StageCountMismatch
 };
+
+std::ostream &operator<<(std::ostream &os, Error e) {
+    switch (e) {
+    case Error::StageAlreadyExists:
+        return os << "StageAlreadyExists";
+    case Error::StageCountMismatch:
+        return os << "StageCountMismatch";
+    case Error::UnknownStage:
+        return os << "UnknownStage";
+    case Error::TypeMismatch:
+        return os << "TypeMismatch";
+    }
+    return os << "UnknownError";
+}
 
 template <class T> using Result = std::expected<T, Error>;
 using Status = Result<std::monostate>;
@@ -76,7 +102,7 @@ class Pipeline {
 
             for (const auto &neighbor : upstream_edges.at(curr)) {
                 if (!graph.contains(neighbor)) {
-                    graph.insert(curr);
+                    graph.insert(neighbor);
                     frontier.push(neighbor);
                 }
             }
@@ -114,7 +140,6 @@ class Pipeline {
             upstream_edges.at(id).push_back(dep);
             in_degree.at(id)++;
         }
-
         return Port<Out>{id};
     }
 
@@ -126,7 +151,7 @@ class Pipeline {
         Result<std::unordered_set<Key>> upstream_stages_result =
             get_all_upstream_stages(out.id);
         if (!upstream_stages_result.has_value()) {
-            return upstream_stages_result.error();
+            return std::unexpected(upstream_stages_result.error());
         }
 
         std::unordered_set<Key> all_stages_to_run =
@@ -158,11 +183,11 @@ class Pipeline {
         }
 
         if (num_stages_run != all_stages_to_run.size()) {
-            return std::unexpected(Error::CycleDetected);
+            return std::unexpected(Error::StageCountMismatch);
         }
 
         try {
-            return std::any_cast<T>(context.stage_results.at(out.stage));
+            return std::any_cast<T>(context.stage_results.at(out.id));
         } catch (const std::bad_any_cast &) {
             return std::unexpected(Error::TypeMismatch);
         } catch (const std::out_of_range &) {
