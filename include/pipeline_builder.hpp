@@ -41,7 +41,7 @@ class StageModel final : public IStage {
 
 enum class Error {
     StageAlreadyExists,
-    UnknownDependency,
+    UnknownStage,
     TypeMismatch,
     CycleDetected
 };
@@ -71,7 +71,7 @@ class Pipeline {
             frontier.pop();
 
             if (!upstream_edges.contains(curr)) {
-                return std::unexpected(Error::UnknownDependency);
+                return std::unexpected(Error::UnknownStage);
             }
 
             for (const auto &neighbor : upstream_edges.at(curr)) {
@@ -97,7 +97,7 @@ class Pipeline {
         std::vector<Key> upstream_deps = {upstream_ports.id...};
         for (const auto &dep : upstream_deps) {
             if (!stages.contains(dep)) {
-                return std::unexpected(Error::UnknownDependency);
+                return std::unexpected(Error::UnknownStage);
             }
         }
 
@@ -143,7 +143,7 @@ class Pipeline {
             Key curr = ready.front();
             ready.pop();
             if (!stages.contains(curr)) {
-                return std::unexpected(Error::UnknownDependency);
+                return std::unexpected(Error::UnknownStage);
             }
             stages.at(curr)->run(context);
             num_stages_run++;
@@ -166,7 +166,7 @@ class Pipeline {
         } catch (const std::bad_any_cast &) {
             return std::unexpected(Error::TypeMismatch);
         } catch (const std::out_of_range &) {
-            return std::unexpected(Error::UnknownDependency);
+            return std::unexpected(Error::UnknownStage);
         }
     }
 };
