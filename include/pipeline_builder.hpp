@@ -10,12 +10,16 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 namespace pipeline {
 
 using Key = std::string;
 using Value = std::any;
 struct Context {
+    std::mutex mut;
     std::unordered_map<Key, Value> stage_results;
 };
 
@@ -26,30 +30,59 @@ class IStage {
     virtual void run(Context &context) = 0;
 };
 
-template <class Out, class F, class... Ins>
-class StageModel final : public IStage {
+template <class Out, class F>
+class Stage0 final : public IStage {
   private:
     Key stage;
-    std::vector<std::string> upstream_deps;
     F func;
 
-    template <std::size_t... I>
-    void run_impl(Context &context, std::index_sequence<I...>) {
-        Out result = std::invoke(
-            func, std::any_cast<const Ins &>(
-                      context.stage_results.at(upstream_deps[I]))...);
-
-        context.stage_results[stage] = std::move(result);
-    }
-
   public:
-    StageModel(Key stage, std::vector<Key> upstream_deps, F func)
-        : stage(std::move(stage)), upstream_deps(std::move(upstream_deps)),
-          func(std::forward<F>(func)) {}
+    Stage0(Key stage, F func)
+        : stage(std::move(stage)), func(std::forward<F>(func)) {}
 
     Key stage_key() const override { return stage; }
     void run(Context &context) override {
-        run_impl(context, std::index_sequence_for<Ins...>{});
+        Out result = std::invoke(func);
+        context.stage_results[stage] = std::move(result);
+    }
+};
+
+template <class Out, class In, class F>
+class Stage1 final : public IStage {
+  private:
+    Key stage;
+    F func;
+    Key dep;
+
+  public:
+    Stage1(Key stage, Key input, F func)
+        : stage(std::move(stage)), dep(std::move(input)), func(std::forward<F>(func)) {}
+
+    Key stage_key() const override { return stage; }
+    void run(Context &context) override {
+        const In& input = std::any_cast<const In&>(context.stage_results.at(dep));
+        Out result = std::invoke(func, input);
+        context.stage_results[stage] = std::move(result);
+    }
+};
+
+template <class In1, class In2>
+class JoinStage final : public IStage {
+  private:
+    Key stage;
+    Key in1, in2;
+  public:
+    JoinStage(Key stage, Key in1, Key in2) :
+        stage(std::move(stage)), in1(std::move(in1)), in2(std::move(in2)) {}
+    
+    Key stage_key() const override {
+        return stage;
+    }
+
+    void run(Context& context) override {
+        const In1& input_1 = std::any_cast<const In1&>(context.stage_results.at(in1));
+        const In2& input_2 = std::any_cast<const In2&>(context.stage_results.at(in2));
+        context.stage_results[stage] = std::pair<In1, In2>{input_1, input_2};
     }
 };
 
@@ -89,8 +122,10 @@ class Pipeline {
     std::unordered_map<Key, std::unique_ptr<IStage>> stages;
     std::unordered_map<Key, std::vector<Key>> downstream_edges;
     std::unordered_map<Key, std::vector<Key>> upstream_edges;
-    std::unordered_map<Key, int> in_degree;
+    std::unordered_map<Key, std::atomic<int>> in_degree;
     Context context;
+
+    std::vector<std::thread> workers;
 
     Result<std::unordered_set<Key>> get_all_upstream_stages(const Key &key) {
         std::unordered_set<Key> graph;
@@ -118,78 +153,70 @@ class Pipeline {
   public:
     Pipeline() = default;
 
-    template <class Out, class... Ins>
-    Result<Port<Out>> add_stage(Key id, auto &&func,
-                                Port<Ins>... upstream_ports) {
+    // template <class Out, class... Ins>
+    // Result<Port<Out>> add_stage(Key id, auto &&func,
+    //                             Port<Ins>... upstream_ports) {
+    //     if (stages.contains(id)) {
+    //         return std::unexpected(Error::StageAlreadyExists);
+    //     }
+
+    //     std::vector<Key> upstream_deps = {upstream_ports.id...};
+    //     for (const auto &dep : upstream_deps) {
+    //         if (!stages.contains(dep)) {
+    //             return std::unexpected(Error::UnknownStage);
+    //         }
+    //     }
+
+    //     std::unique_ptr<IStage> stage_ptr = std::make_unique<
+    //         Stage0<Out, std::decay_t<decltype(func)>, Ins...>>(
+    //         id, upstream_deps, std::forward<decltype(func)>(func));
+
+    //     stages.emplace(id, std::move(stage_ptr));
+    //     downstream_edges.try_emplace(id);
+    //     upstream_edges.try_emplace(id);
+    //     in_degree.try_emplace(id, 0);
+    //     for (const auto &dep : upstream_deps) {
+    //         downstream_edges.at(dep).push_back(id);
+    //         upstream_edges.at(id).push_back(dep);
+    //         in_degree.at(id)++;
+    //     }
+    //     return Port<Out>{id};
+    // }
+    template <class Out>
+    Result<Port<Out>> add_stage(Key id, auto&& func) {
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
 
-        std::vector<Key> upstream_deps = {upstream_ports.id...};
-        for (const auto &dep : upstream_deps) {
-            if (!stages.contains(dep)) {
-                return std::unexpected(Error::UnknownStage);
-            }
-        }
-
         std::unique_ptr<IStage> stage_ptr = std::make_unique<
-            StageModel<Out, std::decay_t<decltype(func)>, Ins...>>(
-            id, upstream_deps, std::forward<decltype(func)>(func));
+            Stage0<
+                    Out, std::decay_t<decltype(func)>
+                >
+        >(id, func);
+        stages.emplace(id, std::move(stage_ptr));
+        downstream_edges.try_emplace(id);
+        upstream_edges.try_emplace(id);
+        in_degree.try_emplace(id, 0);
+        return Port<Out>{id};
+    }
+
+    template <class Out, class In>
+    Result<Port<Out>> add_stage(Key id, auto&& func, Port<In> upstream) {
+        if (stages.contains(id)) {return std::unexpected(Error::StageAlreadyExists);}
+        if (!stages.contains(upstream.id)) {return std::unexpected(Error::UnknownStage);}
+        std::unique_ptr<IStage> stage_ptr =
+            std::make_unique<Stage1<Out, In, std::decay_t<decltype(func)>>>(id, upstream.id, func);
 
         stages.emplace(id, std::move(stage_ptr));
         downstream_edges.try_emplace(id);
         upstream_edges.try_emplace(id);
         in_degree.try_emplace(id, 0);
-        for (const auto &dep : upstream_deps) {
-            downstream_edges.at(dep).push_back(id);
-            upstream_edges.at(id).push_back(dep);
-            in_degree.at(id)++;
-        }
-        return Port<Out>{id};
-    }
 
-    Result<Port<std::vector<std::uint8_t>>>
-    add_file_source_bytes(Key id, const std::string &path) {
-        return add_stage<std::vector<std::uint8_t>>(std::move(id), [path]() {
-            std::ifstream f(path, std::ios::binary);
-            if (!f)
-                throw std::runtime_error("open failed: " + path);
+        downstream_edges.at(upstream.id).push_back(id);
+        upstream_edges.at(id).push_back(upstream.id);
+        in_degree.at(id)++;
 
-            return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(f),
-                                             std::istreambuf_iterator<char>()};
-        });
-    }
-
-    Result<Port<std::vector<std::uint8_t>>>
-    add_file_source_bytes(Key id, const std::string &path, Port<std::monostate> after) {
-        return add_stage<std::vector<std::uint8_t>>(std::move(id), [path](std::monostate) {
-            std::ifstream f(path, std::ios::binary);
-            if (!f)
-                throw std::runtime_error("open failed: " + path);
-
-            return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(f),
-                                             std::istreambuf_iterator<char>()};
-        }, after);
-    }
-
-    Result<Port<std::monostate>>
-    add_file_sink_bytes(Key id,
-                        Port<std::vector<std::uint8_t>> data_port,
-                        const std::string& path) {
-        return add_stage<std::monostate>(
-            std::move(id),
-            [path](const std::vector<std::uint8_t>& data) {
-                std::ofstream f(path, std::ios::binary);
-                if (!f) throw std::runtime_error("open failed: " + path);
-
-                f.write(reinterpret_cast<const char*>(data.data()),
-                        static_cast<std::streamsize>(data.size()));
-                if (!f) throw std::runtime_error("write failed: " + path);
-
-                return std::monostate{};
-            },
-            data_port
-        );
+        return Port<Out>{id}; 
     }
 
     template <class T> Result<T> run(const Port<T> &out) {
