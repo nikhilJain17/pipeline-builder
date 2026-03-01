@@ -153,14 +153,14 @@ class Pipeline {
   public:
     Pipeline() = default;
 
-    template <class Out> Result<Port<Out>> add_stage(Key id, auto &&func) {
+    template <class Out, class F>
+        requires std::invocable<F> && std::same_as<std::invoke_result_t<F>, Out>
+    Result<Port<Out>> add_stage(Key id, F &&func) {
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
-
         std::unique_ptr<IStage> stage_ptr =
-            std::make_unique<Stage0<Out, std::decay_t<decltype(func)>>>(id,
-                                                                        func);
+            std::make_unique<Stage0<Out, std::decay_t<F>>>(id, func);
         stages.emplace(id, std::move(stage_ptr));
         downstream_edges.try_emplace(id);
         upstream_edges.try_emplace(id);
@@ -168,8 +168,10 @@ class Pipeline {
         return Port<Out>{id};
     }
 
-    template <class Out, class In>
-    Result<Port<Out>> add_stage(Key id, auto &&func, Port<In> upstream) {
+    template <class Out, class In, class F>
+        requires std::invocable<F, const In &> &&
+                 std::same_as<std::invoke_result_t<F, const In &>, Out>
+    Result<Port<Out>> add_stage(Key id, F &&func, Port<In> upstream) {
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
@@ -177,8 +179,8 @@ class Pipeline {
             return std::unexpected(Error::UnknownStage);
         }
         std::unique_ptr<IStage> stage_ptr =
-            std::make_unique<Stage1<Out, In, std::decay_t<decltype(func)>>>(
-                id, upstream.id, func);
+            std::make_unique<Stage1<Out, In, std::decay_t<F>>>(id, upstream.id,
+                                                               func);
 
         stages.emplace(id, std::move(stage_ptr));
         downstream_edges.try_emplace(id);
@@ -190,6 +192,58 @@ class Pipeline {
         in_degree.at(id)++;
 
         return Port<Out>{id};
+    }
+
+    Result<Port<std::monostate>>
+    write_bytes_to_file(Key id, const std::string &path,
+                        Port<std::vector<std::uint8_t>> bytes_input) {
+        if (stages.contains(id)) {
+            return std::unexpected(Error::StageAlreadyExists);
+        }
+
+        return add_stage<std::monostate>(
+            std::move(id),
+            [path](const std::vector<std::uint8_t> &data) {
+                std::ofstream f(path, std::ios::binary);
+                if (!f || !f.write(reinterpret_cast<const char *>(data.data()),
+                                   static_cast<std::streamsize>(data.size()))) {
+                    throw std::runtime_error("file write failed: " + path);
+                }
+                return std::monostate{};
+            },
+            bytes_input);
+    }
+
+    Result<Port<std::vector<std::uint8_t>>> read_bytes_from_file(
+        Key id, const std::string &path,
+        std::optional<Port<std::monostate>> after = std::nullopt) {
+        if (stages.contains(id)) {
+            return std::unexpected(Error::StageAlreadyExists);
+        }
+
+        if (after) {
+            return add_stage<std::vector<std::uint8_t>>(
+                std::move(id),
+                [path](std::monostate) -> std::vector<std::uint8_t> {
+                    std::ifstream f(path, std::ios::binary);
+                    if (!f)
+                        throw std::runtime_error("open failed: " + path);
+                    return std::vector<std::uint8_t>{
+                        std::istreambuf_iterator<char>(f),
+                        std::istreambuf_iterator<char>()};
+                },
+                *after);
+        }
+
+        return add_stage<std::vector<std::uint8_t>>(
+            std::move(id), [path]() -> std::vector<std::uint8_t> {
+                std::ifstream f(path, std::ios::binary);
+                if (!f)
+                    throw std::runtime_error("open failed: " + path);
+                return std::vector<std::uint8_t>{
+                    std::istreambuf_iterator<char>(f),
+                    std::istreambuf_iterator<char>()};
+            });
     }
 
     template <class In1, class In2>
