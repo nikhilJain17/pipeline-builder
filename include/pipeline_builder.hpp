@@ -2,6 +2,8 @@
 
 #include <any>
 #include <expected>
+#include <fstream>
+#include <ios>
 #include <iostream>
 #include <queue>
 #include <string>
@@ -55,7 +57,8 @@ enum class Error {
     StageAlreadyExists,
     UnknownStage,
     TypeMismatch,
-    StageCountMismatch
+    StageCountMismatch,
+    IoError,
 };
 
 std::ostream &operator<<(std::ostream &os, Error e) {
@@ -68,6 +71,8 @@ std::ostream &operator<<(std::ostream &os, Error e) {
         return os << "UnknownStage";
     case Error::TypeMismatch:
         return os << "TypeMismatch";
+    case Error::IoError:
+        return os << "IoError";
     }
     return os << "UnknownError";
 }
@@ -143,6 +148,50 @@ class Pipeline {
         return Port<Out>{id};
     }
 
+    Result<Port<std::vector<std::uint8_t>>>
+    add_file_source_bytes(Key id, const std::string &path) {
+        return add_stage<std::vector<std::uint8_t>>(std::move(id), [path]() {
+            std::ifstream f(path, std::ios::binary);
+            if (!f)
+                throw std::runtime_error("open failed: " + path);
+
+            return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(f),
+                                             std::istreambuf_iterator<char>()};
+        });
+    }
+
+    Result<Port<std::vector<std::uint8_t>>>
+    add_file_source_bytes(Key id, const std::string &path, Port<std::monostate> after) {
+        return add_stage<std::vector<std::uint8_t>>(std::move(id), [path](std::monostate) {
+            std::ifstream f(path, std::ios::binary);
+            if (!f)
+                throw std::runtime_error("open failed: " + path);
+
+            return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(f),
+                                             std::istreambuf_iterator<char>()};
+        }, after);
+    }
+
+    Result<Port<std::monostate>>
+    add_file_sink_bytes(Key id,
+                        Port<std::vector<std::uint8_t>> data_port,
+                        const std::string& path) {
+        return add_stage<std::monostate>(
+            std::move(id),
+            [path](const std::vector<std::uint8_t>& data) {
+                std::ofstream f(path, std::ios::binary);
+                if (!f) throw std::runtime_error("open failed: " + path);
+
+                f.write(reinterpret_cast<const char*>(data.data()),
+                        static_cast<std::streamsize>(data.size()));
+                if (!f) throw std::runtime_error("write failed: " + path);
+
+                return std::monostate{};
+            },
+            data_port
+        );
+    }
+
     template <class T> Result<T> run(const Port<T> &out) {
         // Start each run with a fresh state.
         // Allowing the user to optionally cache outputs
@@ -170,7 +219,12 @@ class Pipeline {
             if (!stages.contains(curr)) {
                 return std::unexpected(Error::UnknownStage);
             }
-            stages.at(curr)->run(context);
+            try {
+                stages.at(curr)->run(context);
+            } catch (const std::exception& e) {
+                std::cout << "Exception " << e.what() << "\n";
+                return std::unexpected(Error::IoError);
+            }
             num_stages_run++;
 
             for (const auto &downstream : downstream_edges.at(curr)) {

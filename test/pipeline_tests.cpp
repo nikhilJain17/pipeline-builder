@@ -104,3 +104,55 @@ TEST(PipelineTest, RunDiamondDependency) {
     // sum = 6 + 15 = 21
     ASSERT_EQ(output.value(), 21);
 }
+
+TEST(PipelineTest, WriteReadIncrementPipeline) {
+    // Test using the filesystem as inputs/outputs
+    // 1. Generate a number
+    // 2. Write data to a file
+    // 3. Read data from the file
+    // 4. Increment number
+
+    const std::string path = "message.txt";
+    std::ofstream f("message.txt");
+    f.close();
+
+    Pipeline p;
+
+    // Stage 1: generate number
+    auto gen = p.add_stage<std::string>("generate", [] {
+        return std::string("Hello world");  
+    }).value();
+
+    // transform to std::vector<uint8_t>
+    auto string_to_vector = p.add_stage<std::vector<uint8_t>>("string to vector",
+        [](const std::string& s) {
+            return std::vector<std::uint8_t>(s.begin(), s.end());
+        }, gen).value();
+
+    // Stage 2: write number to file
+    auto write = p.add_file_sink_bytes("write", string_to_vector, path).value();
+
+    // Stage 3: read number back
+    auto read = p.add_file_source_bytes("read", path, write).value();
+
+    auto vector_to_string = p.add_stage<std::string>("vector to string",
+        [](const std::vector<uint8_t>& v) {
+            return std::string(v.begin(), v.end());
+        }, read
+    ).value();
+
+    // Stage 4: increment
+    auto append = p.add_stage<std::string>(
+        "append",
+        [](std::string s) { return s + std::string(", goodbye world"); },
+        vector_to_string
+    ).value();
+
+    auto result = p.run<std::string>(append);
+
+    if (!result.has_value()) {
+        std::cout << result.error() << " is the error\n";
+    }
+    ASSERT_TRUE(result.has_value());
+    ASSERT_EQ(result.value(), "Hello world, goodbye world");
+}

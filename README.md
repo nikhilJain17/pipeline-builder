@@ -45,6 +45,29 @@ On success, returns a `Port<Out>` object to be used to fetch results or wire dep
 
 On failure, returns a `pipeline::Error`.
 
+
+```
+Result<Port<std::vector<std::uint8_t>>>
+add_file_source_bytes(Key id, const std::string &path)
+```
+Syntactic sugar to add a stage which reads a file and returns a `std::vector<uint8_t>`.
+
+```
+Result<Port<std::vector<std::uint8_t>>>
+add_file_source_bytes(Key id, 
+                    const std::string &path, 
+                    Port<std::monostate> after) 
+```
+Syntactic sugar to add a stage which reads a file and returns `std::vector<uint8_t>`, executing after a void return-value stage (e.g. a stage which writes to a filepath)
+
+```
+Result<Port<std::monostate>>
+add_file_sink_bytes(Key id,
+                    Port<std::vector<std::uint8_t>> data_port,
+                    const std::string& path) 
+```
+Syntactic sugar to add a stage which inputs a `std::vector<uint8_t>` from a `data_port` and writes to a file.
+
 ```
 template <class T>
 Result<T> run(const Port<T>& output_port);
@@ -61,7 +84,6 @@ Executes the minimal upstream subgraph required to compute the requested output
 - Topological execution of stages
 
 ## Future Work  
-- Separation between control dependencies (must wait for prior task to execute, but do not read in its data) and data dependencies (must wait for prior task to execute and also read in its data)  
 - Option to cache results on reruns (currently each new run discards all previously cached results)
 - Soft dependencies, allowing tasks to be skipped on failure
 - Retry policy to automatically rerun failed tasks  
