@@ -1,18 +1,18 @@
 #pragma once
 
 #include <any>
+#include <atomic>
 #include <expected>
 #include <fstream>
 #include <ios>
 #include <iostream>
+#include <mutex>
 #include <queue>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <thread>
-#include <mutex>
-#include <atomic>
 
 namespace pipeline {
 
@@ -30,8 +30,7 @@ class IStage {
     virtual void run(Context &context) = 0;
 };
 
-template <class Out, class F>
-class Stage0 final : public IStage {
+template <class Out, class F> class Stage0 final : public IStage {
   private:
     Key stage;
     F func;
@@ -47,8 +46,7 @@ class Stage0 final : public IStage {
     }
 };
 
-template <class Out, class In, class F>
-class Stage1 final : public IStage {
+template <class Out, class In, class F> class Stage1 final : public IStage {
   private:
     Key stage;
     F func;
@@ -56,32 +54,34 @@ class Stage1 final : public IStage {
 
   public:
     Stage1(Key stage, Key input, F func)
-        : stage(std::move(stage)), dep(std::move(input)), func(std::forward<F>(func)) {}
+        : stage(std::move(stage)), dep(std::move(input)),
+          func(std::forward<F>(func)) {}
 
     Key stage_key() const override { return stage; }
     void run(Context &context) override {
-        const In& input = std::any_cast<const In&>(context.stage_results.at(dep));
+        const In &input =
+            std::any_cast<const In &>(context.stage_results.at(dep));
         Out result = std::invoke(func, input);
         context.stage_results[stage] = std::move(result);
     }
 };
 
-template <class In1, class In2>
-class JoinStage final : public IStage {
+template <class In1, class In2> class JoinStage final : public IStage {
   private:
     Key stage;
     Key in1, in2;
-  public:
-    JoinStage(Key stage, Key in1, Key in2) :
-        stage(std::move(stage)), in1(std::move(in1)), in2(std::move(in2)) {}
-    
-    Key stage_key() const override {
-        return stage;
-    }
 
-    void run(Context& context) override {
-        const In1& input_1 = std::any_cast<const In1&>(context.stage_results.at(in1));
-        const In2& input_2 = std::any_cast<const In2&>(context.stage_results.at(in2));
+  public:
+    JoinStage(Key stage, Key in1, Key in2)
+        : stage(std::move(stage)), in1(std::move(in1)), in2(std::move(in2)) {}
+
+    Key stage_key() const override { return stage; }
+
+    void run(Context &context) override {
+        const In1 &input_1 =
+            std::any_cast<const In1 &>(context.stage_results.at(in1));
+        const In2 &input_2 =
+            std::any_cast<const In2 &>(context.stage_results.at(in2));
         context.stage_results[stage] = std::pair<In1, In2>{input_1, input_2};
     }
 };
@@ -153,46 +153,14 @@ class Pipeline {
   public:
     Pipeline() = default;
 
-    // template <class Out, class... Ins>
-    // Result<Port<Out>> add_stage(Key id, auto &&func,
-    //                             Port<Ins>... upstream_ports) {
-    //     if (stages.contains(id)) {
-    //         return std::unexpected(Error::StageAlreadyExists);
-    //     }
-
-    //     std::vector<Key> upstream_deps = {upstream_ports.id...};
-    //     for (const auto &dep : upstream_deps) {
-    //         if (!stages.contains(dep)) {
-    //             return std::unexpected(Error::UnknownStage);
-    //         }
-    //     }
-
-    //     std::unique_ptr<IStage> stage_ptr = std::make_unique<
-    //         Stage0<Out, std::decay_t<decltype(func)>, Ins...>>(
-    //         id, upstream_deps, std::forward<decltype(func)>(func));
-
-    //     stages.emplace(id, std::move(stage_ptr));
-    //     downstream_edges.try_emplace(id);
-    //     upstream_edges.try_emplace(id);
-    //     in_degree.try_emplace(id, 0);
-    //     for (const auto &dep : upstream_deps) {
-    //         downstream_edges.at(dep).push_back(id);
-    //         upstream_edges.at(id).push_back(dep);
-    //         in_degree.at(id)++;
-    //     }
-    //     return Port<Out>{id};
-    // }
-    template <class Out>
-    Result<Port<Out>> add_stage(Key id, auto&& func) {
+    template <class Out> Result<Port<Out>> add_stage(Key id, auto &&func) {
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
 
-        std::unique_ptr<IStage> stage_ptr = std::make_unique<
-            Stage0<
-                    Out, std::decay_t<decltype(func)>
-                >
-        >(id, func);
+        std::unique_ptr<IStage> stage_ptr =
+            std::make_unique<Stage0<Out, std::decay_t<decltype(func)>>>(id,
+                                                                        func);
         stages.emplace(id, std::move(stage_ptr));
         downstream_edges.try_emplace(id);
         upstream_edges.try_emplace(id);
@@ -201,11 +169,16 @@ class Pipeline {
     }
 
     template <class Out, class In>
-    Result<Port<Out>> add_stage(Key id, auto&& func, Port<In> upstream) {
-        if (stages.contains(id)) {return std::unexpected(Error::StageAlreadyExists);}
-        if (!stages.contains(upstream.id)) {return std::unexpected(Error::UnknownStage);}
+    Result<Port<Out>> add_stage(Key id, auto &&func, Port<In> upstream) {
+        if (stages.contains(id)) {
+            return std::unexpected(Error::StageAlreadyExists);
+        }
+        if (!stages.contains(upstream.id)) {
+            return std::unexpected(Error::UnknownStage);
+        }
         std::unique_ptr<IStage> stage_ptr =
-            std::make_unique<Stage1<Out, In, std::decay_t<decltype(func)>>>(id, upstream.id, func);
+            std::make_unique<Stage1<Out, In, std::decay_t<decltype(func)>>>(
+                id, upstream.id, func);
 
         stages.emplace(id, std::move(stage_ptr));
         downstream_edges.try_emplace(id);
@@ -216,7 +189,38 @@ class Pipeline {
         upstream_edges.at(id).push_back(upstream.id);
         in_degree.at(id)++;
 
-        return Port<Out>{id}; 
+        return Port<Out>{id};
+    }
+
+    template <class In1, class In2>
+    Result<Port<std::pair<In1, In2>>> join(Key id, Port<In1> in1,
+                                           Port<In2> in2) {
+        if (stages.contains(id)) {
+            return std::unexpected(Error::StageAlreadyExists);
+        }
+        if (!stages.contains(in1.id)) {
+            return std::unexpected(Error::UnknownStage);
+        }
+        if (!stages.contains(in2.id)) {
+            return std::unexpected(Error::UnknownStage);
+        }
+
+        std::unique_ptr<IStage> stage_ptr =
+            std::make_unique<JoinStage<In1, In2>>(id, in1.id, in2.id);
+
+        stages.emplace(id, std::move(stage_ptr));
+        downstream_edges.try_emplace(id);
+        upstream_edges.try_emplace(id);
+        in_degree.try_emplace(id, 0);
+
+        downstream_edges.at(in1.id).push_back(id);
+        downstream_edges.at(in2.id).push_back(id);
+        in_degree.at(id) += 2;
+
+        upstream_edges.at(id).push_back(in1.id);
+        upstream_edges.at(id).push_back(in2.id);
+
+        return Port<std::pair<In1, In2>>(id);
     }
 
     template <class T> Result<T> run(const Port<T> &out) {
@@ -248,7 +252,7 @@ class Pipeline {
             }
             try {
                 stages.at(curr)->run(context);
-            } catch (const std::exception& e) {
+            } catch (const std::exception &e) {
                 std::cout << "Exception " << e.what() << "\n";
                 return std::unexpected(Error::IoError);
             }
