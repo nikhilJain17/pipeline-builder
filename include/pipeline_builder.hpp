@@ -37,6 +37,7 @@ enum class Error {
     IoError,
     RuntimeError,
     InvalidThreadCount,
+    MixingStagesAcrossPipelines,
 };
 
 std::ostream &operator<<(std::ostream &os, Error e) {
@@ -55,6 +56,8 @@ std::ostream &operator<<(std::ostream &os, Error e) {
         return os << "RuntimeError";
     case Error::InvalidThreadCount:
         return os << "InvalidThreadCount";
+    case Error::MixingStagesAcrossPipelines:
+        return os << "MixingStagesAcrossPipelines";
     }
     return os << "UnknownError";
 }
@@ -62,8 +65,19 @@ std::ostream &operator<<(std::ostream &os, Error e) {
 template <class T> using Result = std::expected<T, Error>;
 using Status = Result<std::monostate>;
 
-template <class T> struct Port {
+class Pipeline;
+
+template <class T> class Port {
+  private:
+    const Pipeline *owner;
     Key id;
+    // Only Pipeline class may create Ports
+    Port(const Pipeline *owner, Key id) : owner(owner), id(std::move(id)) {}
+    friend class Pipeline;
+    const Pipeline *get_owner() const { return owner; }
+
+  public:
+    const Key &get_id() const { return id; }
 };
 
 class IStage {
@@ -204,14 +218,19 @@ class Pipeline {
         downstream_edges.try_emplace(id);
         upstream_edges.try_emplace(id);
         in_degree.try_emplace(id, 0);
-        return Port<Out>{id};
+        return Port<Out>{this, id};
     }
 
     template <class In, class F>
         requires std::invocable<F, const In &>
-    auto add_stage(Key id, F &&func, Port<In> upstream)
+    auto add_stage(Key id, F &&func, const Port<In> &upstream)
         -> Result<Port<std::invoke_result_t<F, const In &>>> {
         using Out = std::invoke_result_t<F, const In &>;
+        if (upstream.get_owner() != this) {
+            // This error prevents silent collisions of stage ids across
+            // pipelines
+            return std::unexpected(Error::MixingStagesAcrossPipelines);
+        }
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
@@ -231,12 +250,12 @@ class Pipeline {
         upstream_edges.at(id).push_back(upstream.id);
         in_degree.at(id)++;
 
-        return Port<Out>{id};
+        return Port<Out>{this, id};
     }
 
     Result<Port<std::monostate>>
     write_bytes_to_file(Key id, const std::string &path,
-                        Port<std::vector<std::uint8_t>> bytes_input) {
+                        const Port<std::vector<std::uint8_t>> &bytes_input) {
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
@@ -247,7 +266,7 @@ class Pipeline {
                 std::ofstream f(path, std::ios::binary);
                 if (!f || !f.write(reinterpret_cast<const char *>(data.data()),
                                    static_cast<std::streamsize>(data.size()))) {
-                    throw std::runtime_error("file write failed: " + path);
+                    throw Error::IoError;
                 }
                 return std::monostate{};
             },
@@ -266,8 +285,9 @@ class Pipeline {
                 std::move(id),
                 [path](std::monostate) -> std::vector<std::uint8_t> {
                     std::ifstream f(path, std::ios::binary);
-                    if (!f)
-                        throw std::runtime_error("open failed: " + path);
+                    if (!f) {
+                        throw Error::IoError;
+                    }
                     return std::vector<std::uint8_t>{
                         std::istreambuf_iterator<char>(f),
                         std::istreambuf_iterator<char>()};
@@ -287,6 +307,9 @@ class Pipeline {
     template <class In1, class In2>
     Result<Port<std::pair<In1, In2>>> join(Key id, Port<In1> in1,
                                            Port<In2> in2) {
+        if (in1.get_owner() != this || in2.get_owner() != this) {
+            return std::unexpected(Error::MixingStagesAcrossPipelines);
+        }
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
@@ -312,7 +335,7 @@ class Pipeline {
         upstream_edges.at(id).push_back(in1.id);
         upstream_edges.at(id).push_back(in2.id);
 
-        return Port<std::pair<In1, In2>>(id);
+        return Port<std::pair<In1, In2>>(this, id);
     }
 
     template <class T>

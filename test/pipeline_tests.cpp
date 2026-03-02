@@ -103,11 +103,12 @@ TEST(PipelineTest, DiamondDependency) {
     */
     Pipeline p;
 
-    auto src_port = p.add_stage("src", src).value();
-    auto incr_port = p.add_stage("increment", incr, src_port).value();
-    auto triple_port = p.add_stage("triple", triple, src_port).value();
-    auto join_port = p.join("join", incr_port, triple_port).value();
-    auto sum_port = p.add_stage("sum", sum, join_port).value();
+    Port<int> src_port = p.add_stage("src", src).value();
+    Port<int> incr_port = p.add_stage("increment", incr, src_port).value();
+    Port<int> triple_port = p.add_stage("triple", triple, src_port).value();
+    Port<std::pair<int, int>> join_port =
+        p.join("join", incr_port, triple_port).value();
+    Port<int> sum_port = p.add_stage("sum", sum, join_port).value();
     Result<int> output = p.run(sum_port);
     ASSERT_TRUE(output.has_value());
     // (5 + 1) + (5 * 3) = 21
@@ -178,4 +179,21 @@ TEST(PipelineTest, MultithreadedJoinFileIOTest) {
     Result<std::string> out = p.run(signature_port, 6);
     ASSERT_TRUE(out.has_value());
     ASSERT_EQ(out.value(), "HELLO WORLD\nFrom NIKHIL");
+}
+
+TEST(PipelineTest, CannotMixStagesAcrossPipelines) {
+    Pipeline p1;
+    Pipeline p2;
+
+    // Create a stage in p1, get a Port<int> owned by p1
+    auto src_res = p1.add_stage("src", [] { return 42; });
+    ASSERT_TRUE(src_res.has_value());
+    auto src = src_res.value();
+
+    // Try to use p1's port as an upstream dependency in p2
+    auto bad_res = p2.add_stage(
+        "use_foreign_port", [](const int &x) { return x + 1; }, src);
+
+    ASSERT_FALSE(bad_res.has_value());
+    EXPECT_EQ(bad_res.error(), Error::MixingStagesAcrossPipelines);
 }
