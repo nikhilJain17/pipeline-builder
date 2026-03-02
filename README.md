@@ -9,21 +9,21 @@ The pipeline is represented as a directed acyclic graph of type-erased stages. E
 ```
 Pipeline p;
 
-auto src = p.add_stage("src", [] {
+Port<int> src = p.add_stage("src", [] {
     return 5;
 }).value();
 
-auto incr = p.add_stage("incr",
+Port<int> incr = p.add_stage("incr",
     [](int x) { return x + 1; },
     src
 ).value();
 
-auto triple = p.add_stage("triple",
+Port<int> triple = p.add_stage("triple",
     [](int x) { return x * 3; },
     incr
 ).value();
 
-auto result = p.run(triple).value();
+Result<int> result = p.run(triple).value();
 // result == (5 + 1) * 3
 ```
 
