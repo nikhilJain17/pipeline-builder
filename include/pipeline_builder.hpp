@@ -29,6 +29,43 @@ struct Context {
     std::unordered_map<Key, Value> stage_results;
 };
 
+enum class Error {
+    StageAlreadyExists,
+    UnknownStage,
+    TypeMismatch,
+    StageCountMismatch,
+    IoError,
+    RuntimeError,
+    InvalidThreadCount,
+};
+
+std::ostream &operator<<(std::ostream &os, Error e) {
+    switch (e) {
+    case Error::StageAlreadyExists:
+        return os << "StageAlreadyExists";
+    case Error::StageCountMismatch:
+        return os << "StageCountMismatch";
+    case Error::UnknownStage:
+        return os << "UnknownStage";
+    case Error::TypeMismatch:
+        return os << "TypeMismatch";
+    case Error::IoError:
+        return os << "IoError";
+    case Error::RuntimeError:
+        return os << "RuntimeError";
+    case Error::InvalidThreadCount:
+        return os << "InvalidThreadCount";
+    }
+    return os << "UnknownError";
+}
+
+template <class T> using Result = std::expected<T, Error>;
+using Status = Result<std::monostate>;
+
+template <class T> struct Port {
+    Key id;
+};
+
 class IStage {
   public:
     virtual ~IStage() = default;
@@ -71,7 +108,12 @@ template <class Out, class In, class F> class Stage1 final : public IStage {
         In input;
         {
             std::lock_guard<std::mutex> lg(context.mut);
-            input = std::any_cast<const In &>(context.stage_results.at(dep));
+            try {
+                input =
+                    std::any_cast<const In &>(context.stage_results.at(dep));
+            } catch (const std::bad_any_cast &) {
+                throw Error::TypeMismatch;
+            }
         }
         Out result = std::invoke(func, input);
         {
@@ -97,8 +139,14 @@ template <class In1, class In2> class JoinStage final : public IStage {
         In2 input2;
         {
             std::lock_guard<std::mutex> lg(context.mut);
-            input1 = std::any_cast<const In1 &>(context.stage_results.at(in1));
-            input2 = std::any_cast<const In2 &>(context.stage_results.at(in2));
+            try {
+                input1 =
+                    std::any_cast<const In1 &>(context.stage_results.at(in1));
+                input2 =
+                    std::any_cast<const In2 &>(context.stage_results.at(in2));
+            } catch (const std::bad_any_cast &) {
+                throw Error::TypeMismatch;
+            }
         }
         std::pair<In1, In2> out{input1, input2};
         {
@@ -106,43 +154,6 @@ template <class In1, class In2> class JoinStage final : public IStage {
             context.stage_results[stage] = out;
         }
     }
-};
-
-enum class Error {
-    StageAlreadyExists,
-    UnknownStage,
-    TypeMismatch,
-    StageCountMismatch,
-    IoError,
-    RuntimeError,
-    InvalidThreadCount,
-};
-
-std::ostream &operator<<(std::ostream &os, Error e) {
-    switch (e) {
-    case Error::StageAlreadyExists:
-        return os << "StageAlreadyExists";
-    case Error::StageCountMismatch:
-        return os << "StageCountMismatch";
-    case Error::UnknownStage:
-        return os << "UnknownStage";
-    case Error::TypeMismatch:
-        return os << "TypeMismatch";
-    case Error::IoError:
-        return os << "IoError";
-    case Error::RuntimeError:
-        return os << "RuntimeError";
-    case Error::InvalidThreadCount:
-        return os << "InvalidThreadCount";
-    }
-    return os << "UnknownError";
-}
-
-template <class T> using Result = std::expected<T, Error>;
-using Status = Result<std::monostate>;
-
-template <class T> struct Port {
-    Key id;
 };
 
 class Pipeline {
@@ -332,6 +343,7 @@ class Pipeline {
         std::condition_variable waiting_workers;
         std::atomic<size_t> remaining_jobs = all_stages_to_run.size();
         std::atomic<bool> failed = false;
+        Error err = Error::RuntimeError;
 
         std::vector<std::thread> threads;
         for (int i = 0; i < num_threads; i++) {
@@ -356,6 +368,14 @@ class Pipeline {
                     // Run the stage
                     try {
                         stages.at(curr)->run(context);
+                    } catch (Error e) {
+                        {
+                            std::lock_guard<std::mutex> lg(mut);
+                            err = e;
+                        }
+                        failed = true;
+                        waiting_workers.notify_all();
+                        return;
                     } catch (...) {
                         failed = true;
                         waiting_workers.notify_all();
@@ -390,7 +410,7 @@ class Pipeline {
         }
 
         if (failed.load()) {
-            return std::unexpected(Error::RuntimeError);
+            return std::unexpected(err);
         }
 
         try {
