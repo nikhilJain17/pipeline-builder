@@ -2,23 +2,23 @@
 
 #include <any>
 #include <atomic>
+#include <concepts>
+#include <condition_variable>
 #include <expected>
 #include <fstream>
+#include <functional>
 #include <ios>
 #include <iostream>
+#include <iterator>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 #include <vector>
-#include <concepts>   
-#include <functional> 
-#include <iterator>   
-#include <optional>   
-#include <condition_variable>
-#include <variant>    
 
 namespace pipeline {
 
@@ -51,7 +51,7 @@ template <class Out, class F> class Stage0 final : public IStage {
         {
             std::lock_guard<std::mutex> lg(context.mut);
             context.stage_results[stage] = std::move(result);
-        }   
+        }
     }
 };
 
@@ -151,8 +151,8 @@ class Pipeline {
     std::unordered_map<Key, std::vector<Key>> downstream_edges;
     std::unordered_map<Key, std::vector<Key>> upstream_edges;
     std::unordered_map<Key, int> in_degree;
-    Context context; 
-    
+    Context context;
+
     Result<std::unordered_set<Key>> get_all_upstream_stages(const Key &key) {
         std::unordered_set<Key> graph;
         std::queue<Key> frontier;
@@ -186,7 +186,8 @@ class Pipeline {
             return std::unexpected(Error::StageAlreadyExists);
         }
         std::unique_ptr<IStage> stage_ptr =
-            std::make_unique<Stage0<Out, std::decay_t<F>>>(id, std::forward<F>(func));
+            std::make_unique<Stage0<Out, std::decay_t<F>>>(
+                id, std::forward<F>(func));
         stages.emplace(id, std::move(stage_ptr));
         downstream_edges.try_emplace(id);
         upstream_edges.try_emplace(id);
@@ -205,8 +206,8 @@ class Pipeline {
             return std::unexpected(Error::UnknownStage);
         }
         std::unique_ptr<IStage> stage_ptr =
-            std::make_unique<Stage1<Out, In, std::decay_t<F>>>(id, upstream.id,
-                                                               std::forward<F>(func));
+            std::make_unique<Stage1<Out, In, std::decay_t<F>>>(
+                id, upstream.id, std::forward<F>(func));
 
         stages.emplace(id, std::move(stage_ptr));
         downstream_edges.try_emplace(id);
@@ -304,7 +305,7 @@ class Pipeline {
     }
 
     template <class T>
-    Result<T> run(const Port<T> &stage, size_t num_threads=1) {
+    Result<T> run(const Port<T> &stage, size_t num_threads = 1) {
         auto hc = std::thread::hardware_concurrency();
         if (num_threads == 0 || (hc != 0 && num_threads > hc)) {
             return std::unexpected(Error::InvalidThreadCount);
@@ -332,7 +333,7 @@ class Pipeline {
         Error err = Error::RuntimeError;
         std::atomic<size_t> remaining_jobs = all_stages_to_run.size();
         std::atomic<bool> failed = false;
-        
+
         std::vector<std::thread> threads;
         for (int i = 0; i < num_threads; i++) {
             threads.push_back(std::thread([&]() {
@@ -342,7 +343,8 @@ class Pipeline {
                     {
                         std::unique_lock<std::mutex> uniq(mut);
                         waiting_workers.wait(uniq, [&] {
-                            return failed.load() || !ready.empty() || remaining_jobs.load() == 0;
+                            return failed.load() || !ready.empty() ||
+                                   remaining_jobs.load() == 0;
                         });
 
                         if (failed.load() || remaining_jobs.load() == 0) {
@@ -364,7 +366,8 @@ class Pipeline {
                     // Make downstream ready to run
                     {
                         std::lock_guard<std::mutex> lg(mut);
-                        for (const Key& downstream : downstream_edges.at(curr)) {
+                        for (const Key &downstream :
+                             downstream_edges.at(curr)) {
                             if (all_stages_to_run.contains(downstream)) {
                                 indeg_for_run.at(downstream)--;
                                 if (indeg_for_run.at(downstream) == 0) {
@@ -376,13 +379,12 @@ class Pipeline {
 
                     remaining_jobs.fetch_sub(1);
                     waiting_workers.notify_all();
-
                 }
             }));
         }
 
         waiting_workers.notify_all();
-        for (auto& worker : threads) {
+        for (auto &worker : threads) {
             if (worker.joinable()) {
                 worker.join();
             }
@@ -394,14 +396,12 @@ class Pipeline {
 
         try {
             return std::any_cast<T>(context.stage_results.at(stage.id));
-        } catch (const std::bad_any_cast&) {
+        } catch (const std::bad_any_cast &) {
             return std::unexpected(Error::TypeMismatch);
         } catch (...) {
             return std::unexpected(Error::UnknownStage);
         }
-
     }
-
 };
 
 } // namespace pipeline
