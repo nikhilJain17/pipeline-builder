@@ -17,6 +17,7 @@
 #include <functional> 
 #include <iterator>   
 #include <optional>   
+#include <condition_variable>
 #include <variant>    
 
 namespace pipeline {
@@ -48,7 +49,7 @@ template <class Out, class F> class Stage0 final : public IStage {
     void run(Context &context) override {
         Out result = std::invoke(func);
         {
-            std::unique_lock<std::mutex> uniq(context.mut);
+            std::lock_guard<std::mutex> lg(context.mut);
             context.stage_results[stage] = std::move(result);
         }   
     }
@@ -69,12 +70,12 @@ template <class Out, class In, class F> class Stage1 final : public IStage {
     void run(Context &context) override {
         In input;
         {
-            std::unique_lock<std::mutex> uniq(context.mut);
+            std::lock_guard<std::mutex> lg(context.mut);
             input = std::any_cast<const In &>(context.stage_results.at(dep));
         }
         Out result = std::invoke(func, input);
         {
-            std::unique_lock<std::mutex> uniq(context.mut);
+            std::lock_guard<std::mutex> lg(context.mut);
             context.stage_results[stage] = std::move(result);
         }
     }
@@ -92,12 +93,18 @@ template <class In1, class In2> class JoinStage final : public IStage {
     Key stage_key() const override { return stage; }
 
     void run(Context &context) override {
-        std::unique_lock<std::mutex> uniq(context.mut);
-        const In1 &input_1 =
-            std::any_cast<const In1 &>(context.stage_results.at(in1));
-        const In2 &input_2 =
-            std::any_cast<const In2 &>(context.stage_results.at(in2));
-        context.stage_results[stage] = std::pair<In1, In2>{input_1, input_2};
+        In1 input1;
+        In2 input2;
+        {
+            std::lock_guard<std::mutex> lg(context.mut);
+            input1 = std::any_cast<const In1 &>(context.stage_results.at(in1));
+            input2 = std::any_cast<const In2 &>(context.stage_results.at(in2));
+        }
+        std::pair<In1, In2> out{input1, input2};
+        {
+            std::lock_guard<std::mutex> lg(context.mut);
+            context.stage_results[stage] = out;
+        }
     }
 };
 
@@ -179,7 +186,7 @@ class Pipeline {
             return std::unexpected(Error::StageAlreadyExists);
         }
         std::unique_ptr<IStage> stage_ptr =
-            std::make_unique<Stage0<Out, std::decay_t<F>>>(id, func);
+            std::make_unique<Stage0<Out, std::decay_t<F>>>(id, std::forward<F>(func));
         stages.emplace(id, std::move(stage_ptr));
         downstream_edges.try_emplace(id);
         upstream_edges.try_emplace(id);
@@ -199,7 +206,7 @@ class Pipeline {
         }
         std::unique_ptr<IStage> stage_ptr =
             std::make_unique<Stage1<Out, In, std::decay_t<F>>>(id, upstream.id,
-                                                               func);
+                                                               std::forward<F>(func));
 
         stages.emplace(id, std::move(stage_ptr));
         downstream_edges.try_emplace(id);
@@ -298,7 +305,8 @@ class Pipeline {
 
     template <class T>
     Result<T> run(const Port<T> &stage, size_t num_threads=1) {
-        if (num_threads <= 0 || num_threads > std::thread::hardware_concurrency()) {
+        auto hc = std::thread::hardware_concurrency();
+        if (num_threads == 0 || (hc != 0 && num_threads > hc)) {
             return std::unexpected(Error::InvalidThreadCount);
         }
         context.stage_results.clear();
@@ -314,7 +322,7 @@ class Pipeline {
         std::unordered_map<Key, int> indeg_for_run;
         for (const auto &key : all_stages_to_run) {
             indeg_for_run.emplace(key, in_degree.at(key));
-            if (in_degree.at(key) == 0) {
+            if (indeg_for_run.at(key) == 0) {
                 ready.push(key);
             }
         }
@@ -349,14 +357,13 @@ class Pipeline {
                         stages.at(curr)->run(context);
                     } catch (...) {
                         failed = true;
-                        err = Error::RuntimeError;
                         waiting_workers.notify_all();
                         return;
                     }
 
                     // Make downstream ready to run
                     {
-                        std::unique_lock<std::mutex> uniq(mut);
+                        std::lock_guard<std::mutex> lg(mut);
                         for (const Key& downstream : downstream_edges.at(curr)) {
                             if (all_stages_to_run.contains(downstream)) {
                                 indeg_for_run.at(downstream)--;
