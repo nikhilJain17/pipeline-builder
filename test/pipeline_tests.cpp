@@ -112,7 +112,7 @@ TEST(PipelineTest, DiamondDependency) {
     ASSERT_EQ(output.value(), 21);
 }
 
-TEST(PipelineTest, FileIOTest) {
+TEST(PipelineTest, MultithreadedJoinFileIOTest) {
     /*
       msg      name
        |        |
@@ -159,7 +159,7 @@ TEST(PipelineTest, FileIOTest) {
     auto join_port = p.join("join", read_msg_str_port, read_name_str_port).value();
     auto signature_port = p.add_stage<std::string>("signature", sign_message, join_port).value();
 
-    Result<std::string> out = p.run(signature_port);
+    Result<std::string> out = p.run(signature_port, 6);
     ASSERT_TRUE(out.has_value());
     ASSERT_EQ(out.value(), "HELLO WORLD\nFrom NIKHIL");   
 }

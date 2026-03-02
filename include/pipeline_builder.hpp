@@ -13,6 +13,11 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <concepts>   
+#include <functional> 
+#include <iterator>   
+#include <optional>   
+#include <variant>    
 
 namespace pipeline {
 
@@ -42,7 +47,10 @@ template <class Out, class F> class Stage0 final : public IStage {
     Key stage_key() const override { return stage; }
     void run(Context &context) override {
         Out result = std::invoke(func);
-        context.stage_results[stage] = std::move(result);
+        {
+            std::unique_lock<std::mutex> uniq(context.mut);
+            context.stage_results[stage] = std::move(result);
+        }   
     }
 };
 
@@ -59,10 +67,16 @@ template <class Out, class In, class F> class Stage1 final : public IStage {
 
     Key stage_key() const override { return stage; }
     void run(Context &context) override {
-        const In &input =
-            std::any_cast<const In &>(context.stage_results.at(dep));
+        In input;
+        {
+            std::unique_lock<std::mutex> uniq(context.mut);
+            input = std::any_cast<const In &>(context.stage_results.at(dep));
+        }
         Out result = std::invoke(func, input);
-        context.stage_results[stage] = std::move(result);
+        {
+            std::unique_lock<std::mutex> uniq(context.mut);
+            context.stage_results[stage] = std::move(result);
+        }
     }
 };
 
@@ -78,6 +92,7 @@ template <class In1, class In2> class JoinStage final : public IStage {
     Key stage_key() const override { return stage; }
 
     void run(Context &context) override {
+        std::unique_lock<std::mutex> uniq(context.mut);
         const In1 &input_1 =
             std::any_cast<const In1 &>(context.stage_results.at(in1));
         const In2 &input_2 =
@@ -92,6 +107,8 @@ enum class Error {
     TypeMismatch,
     StageCountMismatch,
     IoError,
+    RuntimeError,
+    InvalidThreadCount,
 };
 
 std::ostream &operator<<(std::ostream &os, Error e) {
@@ -106,6 +123,10 @@ std::ostream &operator<<(std::ostream &os, Error e) {
         return os << "TypeMismatch";
     case Error::IoError:
         return os << "IoError";
+    case Error::RuntimeError:
+        return os << "RuntimeError";
+    case Error::InvalidThreadCount:
+        return os << "InvalidThreadCount";
     }
     return os << "UnknownError";
 }
@@ -122,11 +143,9 @@ class Pipeline {
     std::unordered_map<Key, std::unique_ptr<IStage>> stages;
     std::unordered_map<Key, std::vector<Key>> downstream_edges;
     std::unordered_map<Key, std::vector<Key>> upstream_edges;
-    std::unordered_map<Key, std::atomic<int>> in_degree;
-    Context context;
-
-    std::vector<std::thread> workers;
-
+    std::unordered_map<Key, int> in_degree;
+    Context context; 
+    
     Result<std::unordered_set<Key>> get_all_upstream_stages(const Key &key) {
         std::unordered_set<Key> graph;
         std::queue<Key> frontier;
@@ -277,10 +296,11 @@ class Pipeline {
         return Port<std::pair<In1, In2>>(id);
     }
 
-    template <class T> Result<T> run(const Port<T> &out) {
-        // Start each run with a fresh state.
-        // Allowing the user to optionally cache outputs
-        // is a possible future extension.
+    template <class T>
+    Result<T> run(const Port<T> &out, size_t num_threads=1) {
+        if (num_threads <= 0 || num_threads > std::thread::hardware_concurrency()) {
+            return std::unexpected(Error::InvalidThreadCount);
+        }
         context.stage_results.clear();
         Result<std::unordered_set<Key>> upstream_stages_result =
             get_all_upstream_stages(out.id);
@@ -291,48 +311,90 @@ class Pipeline {
         std::unordered_set<Key> all_stages_to_run =
             upstream_stages_result.value();
         std::queue<Key> ready;
+        std::unordered_map<Key, int> indeg_for_run;
         for (const auto &key : all_stages_to_run) {
+            indeg_for_run.emplace(key, in_degree.at(key));
             if (in_degree.at(key) == 0) {
                 ready.push(key);
             }
         }
 
-        size_t num_stages_run = 0;
-        while (!ready.empty()) {
-            Key curr = ready.front();
-            ready.pop();
-            if (!stages.contains(curr)) {
-                return std::unexpected(Error::UnknownStage);
-            }
-            try {
-                stages.at(curr)->run(context);
-            } catch (const std::exception &e) {
-                std::cout << "Exception " << e.what() << "\n";
-                return std::unexpected(Error::IoError);
-            }
-            num_stages_run++;
+        std::mutex mut;
+        std::condition_variable waiting_workers;
+        Error err = Error::RuntimeError;
+        std::atomic<size_t> remaining_jobs = all_stages_to_run.size();
+        std::atomic<bool> failed = false;
+        
+        std::vector<std::thread> threads;
+        for (int i = 0; i < num_threads; i++) {
+            threads.push_back(std::thread([&]() {
+                while (true) {
+                    Key curr;
+                    // Try to grab a stage from the queue
+                    {
+                        std::unique_lock<std::mutex> uniq(mut);
+                        waiting_workers.wait(uniq, [&] {
+                            return failed.load() || !ready.empty() || remaining_jobs.load() == 0;
+                        });
 
-            for (const auto &downstream : downstream_edges.at(curr)) {
-                if (all_stages_to_run.contains(downstream)) {
-                    if (--in_degree.at(downstream) == 0) {
-                        ready.push(downstream);
+                        if (failed.load() || remaining_jobs.load() == 0) {
+                            return;
+                        }
+                        curr = ready.front();
+                        ready.pop();
                     }
+
+                    // Run the stage
+                    try {
+                        stages.at(curr)->run(context);
+                    } catch (...) {
+                        failed = true;
+                        err = Error::RuntimeError;
+                        waiting_workers.notify_all();
+                        return;
+                    }
+
+                    // Make downstream ready to run
+                    {
+                        std::unique_lock<std::mutex> uniq(mut);
+                        for (const Key& downstream : downstream_edges.at(curr)) {
+                            if (all_stages_to_run.contains(downstream)) {
+                                indeg_for_run.at(downstream)--;
+                                if (indeg_for_run.at(downstream) == 0) {
+                                    ready.push(downstream);
+                                }
+                            }
+                        }
+                    }
+
+                    remaining_jobs.fetch_sub(1);
+                    waiting_workers.notify_all();
+
                 }
+            }));
+        }
+
+        waiting_workers.notify_all();
+        for (auto& worker : threads) {
+            if (worker.joinable()) {
+                worker.join();
             }
         }
 
-        if (num_stages_run != all_stages_to_run.size()) {
-            return std::unexpected(Error::StageCountMismatch);
+        if (failed.load()) {
+            return std::unexpected(err);
         }
 
         try {
             return std::any_cast<T>(context.stage_results.at(out.id));
-        } catch (const std::bad_any_cast &) {
+        } catch (const std::bad_any_cast&) {
             return std::unexpected(Error::TypeMismatch);
-        } catch (const std::out_of_range &) {
+        } catch (...) {
             return std::unexpected(Error::UnknownStage);
         }
+
     }
+
 };
 
 } // namespace pipeline
