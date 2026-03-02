@@ -179,9 +179,10 @@ class Pipeline {
   public:
     Pipeline() = default;
 
-    template <class Out, class F>
-        requires std::invocable<F> && std::same_as<std::invoke_result_t<F>, Out>
-    Result<Port<Out>> add_stage(Key id, F &&func) {
+    template <class F>
+        requires std::invocable<F>
+    auto add_stage(Key id, F &&func) -> Result<Port<std::invoke_result_t<F>>> {
+        using Out = std::invoke_result_t<F>;
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
@@ -195,10 +196,11 @@ class Pipeline {
         return Port<Out>{id};
     }
 
-    template <class Out, class In, class F>
-        requires std::invocable<F, const In &> &&
-                 std::same_as<std::invoke_result_t<F, const In &>, Out>
-    Result<Port<Out>> add_stage(Key id, F &&func, Port<In> upstream) {
+    template <class In, class F>
+        requires std::invocable<F, const In &>
+    auto add_stage(Key id, F &&func, Port<In> upstream)
+        -> Result<Port<std::invoke_result_t<F, const In &>>> {
+        using Out = std::invoke_result_t<F, const In &>;
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
@@ -228,7 +230,7 @@ class Pipeline {
             return std::unexpected(Error::StageAlreadyExists);
         }
 
-        return add_stage<std::monostate>(
+        return add_stage(
             std::move(id),
             [path](const std::vector<std::uint8_t> &data) {
                 std::ofstream f(path, std::ios::binary);
@@ -249,7 +251,7 @@ class Pipeline {
         }
 
         if (after) {
-            return add_stage<std::vector<std::uint8_t>>(
+            return add_stage(
                 std::move(id),
                 [path](std::monostate) -> std::vector<std::uint8_t> {
                     std::ifstream f(path, std::ios::binary);
@@ -262,15 +264,13 @@ class Pipeline {
                 after.value());
         }
 
-        return add_stage<std::vector<std::uint8_t>>(
-            std::move(id), [path]() -> std::vector<std::uint8_t> {
-                std::ifstream f(path, std::ios::binary);
-                if (!f)
-                    throw std::runtime_error("open failed: " + path);
-                return std::vector<std::uint8_t>{
-                    std::istreambuf_iterator<char>(f),
-                    std::istreambuf_iterator<char>()};
-            });
+        return add_stage(std::move(id), [path]() -> std::vector<std::uint8_t> {
+            std::ifstream f(path, std::ios::binary);
+            if (!f)
+                throw std::runtime_error("open failed: " + path);
+            return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(f),
+                                             std::istreambuf_iterator<char>()};
+        });
     }
 
     template <class In1, class In2>
@@ -330,7 +330,6 @@ class Pipeline {
 
         std::mutex mut;
         std::condition_variable waiting_workers;
-        Error err = Error::RuntimeError;
         std::atomic<size_t> remaining_jobs = all_stages_to_run.size();
         std::atomic<bool> failed = false;
 
@@ -391,7 +390,7 @@ class Pipeline {
         }
 
         if (failed.load()) {
-            return std::unexpected(err);
+            return std::unexpected(Error::RuntimeError);
         }
 
         try {
