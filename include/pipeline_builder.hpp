@@ -251,7 +251,7 @@ class Pipeline {
                         std::istreambuf_iterator<char>(f),
                         std::istreambuf_iterator<char>()};
                 },
-                *after);
+                after.value());
         }
 
         return add_stage<std::vector<std::uint8_t>>(
@@ -297,13 +297,13 @@ class Pipeline {
     }
 
     template <class T>
-    Result<T> run(const Port<T> &out, size_t num_threads=1) {
+    Result<T> run(const Port<T> &stage, size_t num_threads=1) {
         if (num_threads <= 0 || num_threads > std::thread::hardware_concurrency()) {
             return std::unexpected(Error::InvalidThreadCount);
         }
         context.stage_results.clear();
         Result<std::unordered_set<Key>> upstream_stages_result =
-            get_all_upstream_stages(out.id);
+            get_all_upstream_stages(stage.id);
         if (!upstream_stages_result.has_value()) {
             return std::unexpected(upstream_stages_result.error());
         }
@@ -386,7 +386,7 @@ class Pipeline {
         }
 
         try {
-            return std::any_cast<T>(context.stage_results.at(out.id));
+            return std::any_cast<T>(context.stage_results.at(stage.id));
         } catch (const std::bad_any_cast&) {
             return std::unexpected(Error::TypeMismatch);
         } catch (...) {
