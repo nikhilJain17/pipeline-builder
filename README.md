@@ -23,7 +23,12 @@ Port<int> triple = p.add_stage("triple",
     incr
 ).value();
 
-Result<int> result = p.run(triple).value();
+Result<int> result = p.run(triple);
+if (result.has_value()) {
+    std::cout << "Output is: " << result.value << "\n";
+} else {
+    std::cout << result.error();
+}
 // result == (5 + 1) * 3
 ```
 
