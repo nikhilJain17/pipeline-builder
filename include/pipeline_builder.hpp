@@ -349,7 +349,7 @@ class Pipeline {
 
     template <class T>
     Result<T> run(const Port<T> &stage, size_t num_threads = 1) {
-        if (stage.get_owner != this) {
+        if (stage.get_owner() != this) {
             return std::unexpected(Error::MixingStagesAcrossPipelines);
         }
         auto hc = std::thread::hardware_concurrency();
