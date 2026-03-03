@@ -258,6 +258,9 @@ class Pipeline {
     Result<Port<std::monostate>>
     write_bytes_to_file(Key id, const std::string &path,
                         const Port<std::vector<std::uint8_t>> &bytes_input) {
+        if (bytes_input.get_owner() != this) {
+            return std::unexpected(Error::MixingStagesAcrossPipelines);
+        }
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
@@ -278,11 +281,14 @@ class Pipeline {
     Result<Port<std::vector<std::uint8_t>>> read_bytes_from_file(
         Key id, const std::string &path,
         std::optional<Port<std::monostate>> after = std::nullopt) {
+        if (after.has_value() && after.value().get_owner() != this) {
+            return std::unexpected(Error::MixingStagesAcrossPipelines);
+        }
         if (stages.contains(id)) {
             return std::unexpected(Error::StageAlreadyExists);
         }
 
-        if (after) {
+        if (after.has_value()) {
             return add_stage(
                 std::move(id),
                 [path](std::monostate) -> std::vector<std::uint8_t> {
@@ -299,8 +305,9 @@ class Pipeline {
 
         return add_stage(std::move(id), [path]() -> std::vector<std::uint8_t> {
             std::ifstream f(path, std::ios::binary);
-            if (!f)
-                throw std::runtime_error("open failed: " + path);
+            if (!f) {
+                throw Error::IoError;
+            }
             return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(f),
                                              std::istreambuf_iterator<char>()};
         });
@@ -342,6 +349,9 @@ class Pipeline {
 
     template <class T>
     Result<T> run(const Port<T> &stage, size_t num_threads = 1) {
+        if (stage.get_owner != this) {
+            return std::unexpected(Error::MixingStagesAcrossPipelines);
+        }
         auto hc = std::thread::hardware_concurrency();
         if (num_threads == 0 || (hc != 0 && num_threads > hc)) {
             return std::unexpected(Error::InvalidThreadCount);
