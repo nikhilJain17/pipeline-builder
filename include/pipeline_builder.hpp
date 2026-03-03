@@ -123,9 +123,11 @@ template <class Out, class In, class F> class Stage1 final : public IStage {
         {
             std::lock_guard<std::mutex> lg(context.mut);
             try {
+                // A stage may not mutate the input within Context, since other stages may read the same input.
                 input =
                     std::any_cast<const In &>(context.stage_results.at(dep));
             } catch (const std::bad_any_cast &) {
+                // Should not happen, since type checking is done via Ports within add_stages
                 throw Error::TypeMismatch;
             }
         }
@@ -376,6 +378,7 @@ class Pipeline {
                     // Try to grab a stage from the queue
                     {
                         std::unique_lock<std::mutex> uniq(mut);
+                        // Wait for a job, unless pipeline has failed or succeeded
                         waiting_workers.wait(uniq, [&] {
                             return failed.load() || !ready.empty() ||
                                    remaining_jobs.load() == 0;
@@ -399,7 +402,12 @@ class Pipeline {
                         failed = true;
                         waiting_workers.notify_all();
                         return;
-                    } catch (...) {
+                    } catch (const std::exception& e) {
+                        {
+                            std::lock_guard<std::mutex> lg(mut);
+                            err = Error::RuntimeError;
+                        }
+                        std::cerr << "Stage " << curr << " threw: " << e.what() << "\n";
                         failed = true;
                         waiting_workers.notify_all();
                         return;

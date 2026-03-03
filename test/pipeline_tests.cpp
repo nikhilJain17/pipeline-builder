@@ -141,7 +141,7 @@ TEST(PipelineTest, MultithreadedJoinFileIOTest) {
     }
 
     Pipeline p;
-    auto msg_port = p.add_stage("message", message).value();
+    Port<std::string> msg_port = p.add_stage("message", message).value();
     auto upper_msg_port = p.add_stage("upper_msg", to_upper, msg_port).value();
     auto upper_msg_to_bytes_port =
         p.add_stage("upper_msg_to_bytes", string_to_bytes, upper_msg_port)
@@ -179,6 +179,7 @@ TEST(PipelineTest, MultithreadedJoinFileIOTest) {
     Result<std::string> out = p.run(signature_port, 6);
     ASSERT_TRUE(out.has_value());
     ASSERT_EQ(out.value(), "HELLO WORLD\nFrom NIKHIL");
+    std::cout << "Output was: " << out.value() << "\n";
 }
 
 TEST(PipelineTest, CannotMixStagesAcrossPipelines) {
